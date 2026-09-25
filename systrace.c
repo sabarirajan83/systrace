@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 
 #define SYSCALL_TABLE_MAX 462
 static const char *SYSCALL_NAMES[SYSCALL_TABLE_MAX] = {
@@ -116,7 +117,6 @@ static const char *CATEGORY_LABEL[CAT__COUNT] = {
 
 static Category classify(long num, const char *name) {
     if (!name) return CAT_OTHER;
-    /* File I/O */
     if (!strcmp(name,"read")||!strcmp(name,"write")||!strcmp(name,"open")||
         !strcmp(name,"close")||!strcmp(name,"stat")||!strcmp(name,"fstat")||
         !strcmp(name,"lstat")||!strcmp(name,"lseek")||!strcmp(name,"pread64")||
@@ -134,13 +134,13 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"dup3")||!strcmp(name,"statx")||!strcmp(name,"faccessat")||
         !strcmp(name,"faccessat2")||!strcmp(name,"openat2")||!strcmp(name,"close_range"))
         return CAT_FILE_IO;
-    /* Memory */
+
     if (!strcmp(name,"mmap")||!strcmp(name,"mprotect")||!strcmp(name,"munmap")||
         !strcmp(name,"brk")||!strcmp(name,"mremap")||!strcmp(name,"msync")||
         !strcmp(name,"mincore")||!strcmp(name,"madvise")||!strcmp(name,"mlock")||
         !strcmp(name,"munlock")||!strcmp(name,"mlockall")||!strcmp(name,"munlockall"))
         return CAT_MEMORY;
-    /* Process / thread control */
+
     if (!strcmp(name,"clone")||!strcmp(name,"clone3")||!strcmp(name,"fork")||
         !strcmp(name,"vfork")||!strcmp(name,"execve")||!strcmp(name,"execveat")||
         !strcmp(name,"exit")||!strcmp(name,"exit_group")||!strcmp(name,"wait4")||
@@ -151,7 +151,7 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"arch_prctl")||!strcmp(name,"set_robust_list")||
         !strcmp(name,"prlimit64")||!strcmp(name,"getpriority")||!strcmp(name,"setpriority"))
         return CAT_PROCESS;
-    /* Networking */
+
     if (!strcmp(name,"socket")||!strcmp(name,"connect")||!strcmp(name,"accept")||
         !strcmp(name,"accept4")||!strcmp(name,"sendto")||!strcmp(name,"recvfrom")||
         !strcmp(name,"sendmsg")||!strcmp(name,"recvmsg")||!strcmp(name,"shutdown")||
@@ -159,7 +159,7 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"getpeername")||!strcmp(name,"socketpair")||
         !strcmp(name,"setsockopt")||!strcmp(name,"getsockopt"))
         return CAT_NETWORK;
-    /* IPC / synchronization */
+
     if (!strcmp(name,"pipe")||!strcmp(name,"pipe2")||!strcmp(name,"futex")||
         !strcmp(name,"futex_wake")||!strcmp(name,"futex_wait")||!strcmp(name,"futex_waitv")||
         !strcmp(name,"shmget")||!strcmp(name,"shmat")||!strcmp(name,"shmctl")||
@@ -170,14 +170,14 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"epoll_wait")||!strcmp(name,"epoll_ctl")||!strcmp(name,"epoll_pwait")||
         !strcmp(name,"select")||!strcmp(name,"poll")||!strcmp(name,"ppoll"))
         return CAT_IPC_SYNC;
-    /* Signals */
+
     if (!strcmp(name,"rt_sigaction")||!strcmp(name,"rt_sigprocmask")||
         !strcmp(name,"rt_sigreturn")||!strcmp(name,"rt_sigpending")||
         !strcmp(name,"rt_sigsuspend")||!strcmp(name,"rt_sigtimedwait")||
         !strcmp(name,"kill")||!strcmp(name,"tkill")||!strcmp(name,"tgkill")||
         !strcmp(name,"signalfd")||!strcmp(name,"signalfd4")||!strcmp(name,"pause"))
         return CAT_SIGNAL;
-    /* Time */
+
     if (!strcmp(name,"clock_gettime")||!strcmp(name,"clock_settime")||
         !strcmp(name,"clock_nanosleep")||!strcmp(name,"nanosleep")||
         !strcmp(name,"gettimeofday")||!strcmp(name,"settimeofday")||
@@ -185,6 +185,7 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"clock_getres")||!strcmp(name,"time")||!strcmp(name,"timer_create")||
         !strcmp(name,"timerfd_create"))
         return CAT_TIME;
+
     (void)num;
     return CAT_OTHER;
 }
@@ -218,8 +219,8 @@ static const ArgHint ARG_HINTS[] = {
     { "rename",   0, -1, -1, false },
     { "symlink",  1, -1, -1, false },
     { "link",     0, -1, -1, false },
-    { "write",   -1,  1,  2, false },   /* buffer is input, valid at entry */
-    { "read",    -1,  1,  2, true  },   /* buffer is output, valid at exit  */
+    { "write",   -1,  1,  2, false },
+    { "read",    -1,  1,  2, true  },
     { "pwrite64",-1,  1,  2, false },
     { "pread64", -1,  1,  2, true  },
     { "send",    -1,  1,  2, false },
@@ -239,15 +240,28 @@ static const ArgHint *find_hint(const char *name) {
 static void read_tracee_bytes(pid_t pid, unsigned long addr, char *outbuf, size_t outsz, size_t cap) {
     if (addr == 0) { snprintf(outbuf, outsz, "NULL"); return; }
     if (cap > (size_t)max_str_len) cap = (size_t)max_str_len;
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/mem", pid);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) { snprintf(outbuf, outsz, "0x%lx", addr); return; }
 
     unsigned char raw[256];
     size_t want = cap < sizeof(raw) - 1 ? cap : sizeof(raw) - 1;
-    ssize_t n = want > 0 ? pread(fd, raw, want, (off_t)addr) : 0;
-    close(fd);
+    ssize_t n = 0;
+
+    struct iovec local[1], remote[1];
+    local[0].iov_base = raw;
+    local[0].iov_len = want;
+    remote[0].iov_base = (void *)addr;
+    remote[0].iov_len = want;
+
+    n = process_vm_readv(pid, local, 1, remote, 1, 0);
+    if (n <= 0) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/mem", pid);
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            n = pread(fd, raw, want, (off_t)addr);
+            close(fd);
+        }
+    }
+
     if (n <= 0) { snprintf(outbuf, outsz, "0x%lx", addr); return; }
 
     size_t o = 0;
@@ -329,13 +343,12 @@ static double us_diff(struct timespec *start, struct timespec *end) {
 }
 
 static bool name_is_filtered_in(const char *name) {
-    if (filter_count == 0) return true; /* no filter => show everything */
+    if (filter_count == 0) return true;
     for (int i = 0; i < filter_count; i++)
         if (name && !strcmp(filter_names[i], name)) return true;
     return false;
 }
 
-/* Fetch the 6 syscall argument registers (x86_64 ABI: rdi,rsi,rdx,r10,r8,r9) */
 static void get_arg_regs(struct user_regs_struct *regs, unsigned long args[6]) {
     args[0] = regs->rdi; args[1] = regs->rsi; args[2] = regs->rdx;
     args[3] = regs->r10; args[4] = regs->r8;  args[5] = regs->r9;
@@ -353,7 +366,7 @@ static void apply_trace_options(pid_t pid) {
 static void format_retval(long ret, char *buf, size_t bufsz) {
     if (ret < 0) {
         int e = (int)(-ret);
-        snprintf(buf, bufsz, "%ld %s (%s)", ret, strerrorname_np(e), strerror(e));
+        snprintf(buf, bufsz, "%ld (%s)", ret, strerror(e));
     } else {
         snprintf(buf, bufsz, "%ld", ret);
     }
@@ -411,7 +424,7 @@ int main(int argc, char *argv[]) {
     if (attach_pid < 0 && cmd_index >= argc) {
         fprintf(stderr,
             "Usage: %s [-v] [-f] [-c] [-tt] [-s N] [-e trace=a,b] [-o file] <command> [args...]\n"
-            "       %s -p <pid>\n", argv[0], argv[0]);
+            "       %s [-v] [-f] [-c] [-tt] [-s N] [-e trace=a,b] [-o file] -p <pid>\n", argv[0], argv[0]);
         return 1;
     }
     if (counts_only) verbose = false;
@@ -419,7 +432,6 @@ int main(int argc, char *argv[]) {
     pid_t root_pid;
 
     if (attach_pid > 0) {
-        /* ---- ATTACH MODE ---- */
         root_pid = attach_pid;
         if (ptrace(PTRACE_SEIZE, root_pid, NULL, follow_forks ?
                 (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL |
@@ -503,7 +515,6 @@ int main(int argc, char *argv[]) {
             ptrace(PTRACE_GETREGS, p, NULL, &regs);
 
             if (!tst->in_syscall) {
-                /* ---- ENTRY ---- */
                 tst->current_syscall = regs.orig_rax;
                 get_arg_regs(&regs, tst->entry_args);
                 clock_gettime(CLOCK_MONOTONIC, &tst->t_start);
@@ -520,7 +531,6 @@ int main(int argc, char *argv[]) {
                             print_timestamp();
                             fprintf(out, "[pid %d] %s(%s) ", p, name ? name : "?", strbuf);
                             fflush(out);
-                            tst->in_syscall = true; /* remember we already printed the prefix */
                         } else if (h && h->buf_arg >= 0 && !h->buf_at_exit) {
                             char strbuf[300];
                             read_tracee_string(p, tst->entry_args[h->buf_arg], strbuf, sizeof(strbuf));
@@ -533,7 +543,6 @@ int main(int argc, char *argv[]) {
                     }
                 }
             } else {
-                /* ---- EXIT ---- */
                 struct timespec t_end;
                 clock_gettime(CLOCK_MONOTONIC, &t_end);
                 long ret_val = (long)regs.rax;
@@ -562,8 +571,6 @@ int main(int argc, char *argv[]) {
                         format_retval(ret_val, retbuf, sizeof(retbuf));
 
                         if (h && h->buf_arg >= 0 && h->buf_at_exit && ret_val > 0) {
-                            /* Output buffer only valid now; print it here instead,
-                             * capped to the bytes the kernel actually wrote. */
                             char strbuf[300];
                             read_tracee_bytes(p, tst->entry_args[h->buf_arg], strbuf, sizeof(strbuf), (size_t)ret_val);
                             print_timestamp();
@@ -572,7 +579,6 @@ int main(int argc, char *argv[]) {
                                     h->len_arg >= 0 ? tst->entry_args[h->len_arg] : 0,
                                     retbuf, elapsed_us, ret_val < 0 ? "  <-- ERROR" : "");
                         } else if (h && (h->path_arg >= 0 || h->buf_arg >= 0)) {
-                            /* We already printed "name(args) " at entry; finish the line */
                             fprintf(out, "= %s  [%.1f us]%s\n", retbuf, elapsed_us,
                                     ret_val < 0 ? "  <-- ERROR" : "");
                         } else {
@@ -595,7 +601,7 @@ int main(int argc, char *argv[]) {
             print_timestamp();
             fprintf(out, "[pid %d] --- signal %d (%s) ---\n", p, sig, strsignal(sig));
         }
-        ptrace(PTRACE_SYSCALL, p, NULL, sig == SIGSTOP ? 0 : (void*)(long)sig);
+        ptrace(PTRACE_SYSCALL, p, NULL, (sig == SIGSTOP || sig == SIGTRAP) ? 0 : (void*)(long)sig);
     }
 
     clock_gettime(CLOCK_MONOTONIC, &wall_end);
