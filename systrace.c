@@ -15,6 +15,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 
+// Lookup table mapping x86_64 system call numbers to their corresponding kernel names.
 #define SYSCALL_TABLE_MAX 462
 static const char *SYSCALL_NAMES[SYSCALL_TABLE_MAX] = {
     "read", "write", "open", "close", "stat", "fstat",
@@ -96,6 +97,7 @@ static const char *SYSCALL_NAMES[SYSCALL_TABLE_MAX] = {
     "futex_requeue", "statmount", "listmount", "lsm_get_self_attr", "lsm_set_self_attr", "lsm_list_modules",
 };
 
+// Global configuration flags and command-line options controlling tracer behavior.
 static bool verbose        = false;
 static bool follow_forks   = false;
 static bool counts_only    = false;
@@ -105,6 +107,7 @@ static FILE *out           = NULL;
 static char *filter_names[64];
 static int   filter_count  = 0;
 
+// Functional categories for grouping system calls into high-level operating system domains.
 typedef enum {
     CAT_FILE_IO, CAT_MEMORY, CAT_PROCESS, CAT_NETWORK,
     CAT_IPC_SYNC, CAT_SIGNAL, CAT_TIME, CAT_OTHER, CAT__COUNT
@@ -115,8 +118,11 @@ static const char *CATEGORY_LABEL[CAT__COUNT] = {
     "IPC/Sync", "Signals", "Time", "Other"
 };
 
+// Classify a system call into its functional category based on its name.
 static Category classify(long num, const char *name) {
     if (!name) return CAT_OTHER;
+
+    // Categorize file and filesystem I/O operations.
     if (!strcmp(name,"read")||!strcmp(name,"write")||!strcmp(name,"open")||
         !strcmp(name,"close")||!strcmp(name,"stat")||!strcmp(name,"fstat")||
         !strcmp(name,"lstat")||!strcmp(name,"lseek")||!strcmp(name,"pread64")||
@@ -135,12 +141,14 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"faccessat2")||!strcmp(name,"openat2")||!strcmp(name,"close_range"))
         return CAT_FILE_IO;
 
+    // Categorize memory management and virtual memory mapping operations.
     if (!strcmp(name,"mmap")||!strcmp(name,"mprotect")||!strcmp(name,"munmap")||
         !strcmp(name,"brk")||!strcmp(name,"mremap")||!strcmp(name,"msync")||
         !strcmp(name,"mincore")||!strcmp(name,"madvise")||!strcmp(name,"mlock")||
         !strcmp(name,"munlock")||!strcmp(name,"mlockall")||!strcmp(name,"munlockall"))
         return CAT_MEMORY;
 
+    // Categorize process lifecycle, execution, and thread scheduling operations.
     if (!strcmp(name,"clone")||!strcmp(name,"clone3")||!strcmp(name,"fork")||
         !strcmp(name,"vfork")||!strcmp(name,"execve")||!strcmp(name,"execveat")||
         !strcmp(name,"exit")||!strcmp(name,"exit_group")||!strcmp(name,"wait4")||
@@ -152,6 +160,7 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"prlimit64")||!strcmp(name,"getpriority")||!strcmp(name,"setpriority"))
         return CAT_PROCESS;
 
+    // Categorize network socket and communication operations.
     if (!strcmp(name,"socket")||!strcmp(name,"connect")||!strcmp(name,"accept")||
         !strcmp(name,"accept4")||!strcmp(name,"sendto")||!strcmp(name,"recvfrom")||
         !strcmp(name,"sendmsg")||!strcmp(name,"recvmsg")||!strcmp(name,"shutdown")||
@@ -160,17 +169,19 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"setsockopt")||!strcmp(name,"getsockopt"))
         return CAT_NETWORK;
 
+    // Categorize inter-process communication (IPC) and synchronization primitives.
     if (!strcmp(name,"pipe")||!strcmp(name,"pipe2")||!strcmp(name,"futex")||
         !strcmp(name,"futex_wake")||!strcmp(name,"futex_wait")||!strcmp(name,"futex_waitv")||
         !strcmp(name,"shmget")||!strcmp(name,"shmat")||!strcmp(name,"shmctl")||
         !strcmp(name,"shmdt")||!strcmp(name,"semget")||!strcmp(name,"semop")||
         !strcmp(name,"semctl")||!strcmp(name,"msgget")||!strcmp(name,"msgsnd")||
-        !strcmp(name,"msgrcv")||!strcmp(name,"msgctl")||!strcmp(name,"eventfd")||
-        !strcmp(name,"eventfd2")||!strcmp(name,"epoll_create")||!strcmp(name,"epoll_create1")||
-        !strcmp(name,"epoll_wait")||!strcmp(name,"epoll_ctl")||!strcmp(name,"epoll_pwait")||
-        !strcmp(name,"select")||!strcmp(name,"poll")||!strcmp(name,"ppoll"))
+        !strcmp(name,"msgrcv")||!strcmp(name,"msgctl")||
+        !strcmp(name,"eventfd")||!strcmp(name,"eventfd2")||!strcmp(name,"epoll_create")||
+        !strcmp(name,"epoll_create1")||!strcmp(name,"epoll_wait")||!strcmp(name,"epoll_ctl")||
+        !strcmp(name,"epoll_pwait")||!strcmp(name,"select")||!strcmp(name,"poll")||!strcmp(name,"ppoll"))
         return CAT_IPC_SYNC;
 
+    // Categorize signal generation, mask manipulation, and handling operations.
     if (!strcmp(name,"rt_sigaction")||!strcmp(name,"rt_sigprocmask")||
         !strcmp(name,"rt_sigreturn")||!strcmp(name,"rt_sigpending")||
         !strcmp(name,"rt_sigsuspend")||!strcmp(name,"rt_sigtimedwait")||
@@ -178,6 +189,7 @@ static Category classify(long num, const char *name) {
         !strcmp(name,"signalfd")||!strcmp(name,"signalfd4")||!strcmp(name,"pause"))
         return CAT_SIGNAL;
 
+    // Categorize system timers, alarms, and clock operations.
     if (!strcmp(name,"clock_gettime")||!strcmp(name,"clock_settime")||
         !strcmp(name,"clock_nanosleep")||!strcmp(name,"nanosleep")||
         !strcmp(name,"gettimeofday")||!strcmp(name,"settimeofday")||
@@ -190,6 +202,7 @@ static Category classify(long num, const char *name) {
     return CAT_OTHER;
 }
 
+// Argument index metadata for extracting string and buffer arguments from specific system calls.
 typedef struct {
     const char *name;
     int  path_arg;     
@@ -230,6 +243,7 @@ static const ArgHint ARG_HINTS[] = {
     { NULL, -1, -1, -1, false }
 };
 
+// Look up argument decoding hints for a specified system call.
 static const ArgHint *find_hint(const char *name) {
     if (!name) return NULL;
     for (int i = 0; ARG_HINTS[i].name; i++)
@@ -237,6 +251,7 @@ static const ArgHint *find_hint(const char *name) {
     return NULL;
 }
 
+// Safely inspect and copy memory from the address space of a traced process.
 static void read_tracee_bytes(pid_t pid, unsigned long addr, char *outbuf, size_t outsz, size_t cap) {
     if (addr == 0) { snprintf(outbuf, outsz, "NULL"); return; }
     if (cap > (size_t)max_str_len) cap = (size_t)max_str_len;
@@ -245,6 +260,7 @@ static void read_tracee_bytes(pid_t pid, unsigned long addr, char *outbuf, size_
     size_t want = cap < sizeof(raw) - 1 ? cap : sizeof(raw) - 1;
     ssize_t n = 0;
 
+    // Read tracee memory using process_vm_readv for efficient cross-process inspection.
     struct iovec local[1], remote[1];
     local[0].iov_base = raw;
     local[0].iov_len = want;
@@ -252,6 +268,8 @@ static void read_tracee_bytes(pid_t pid, unsigned long addr, char *outbuf, size_
     remote[0].iov_len = want;
 
     n = process_vm_readv(pid, local, 1, remote, 1, 0);
+    
+    // Fall back to reading the tracee process memory file via procfs if process_vm_readv fails.
     if (n <= 0) {
         char path[64];
         snprintf(path, sizeof(path), "/proc/%d/mem", pid);
@@ -264,6 +282,7 @@ static void read_tracee_bytes(pid_t pid, unsigned long addr, char *outbuf, size_
 
     if (n <= 0) { snprintf(outbuf, outsz, "0x%lx", addr); return; }
 
+    // Format raw tracee bytes into an escaped, printable string representation.
     size_t o = 0;
     outbuf[o++] = '"';
     for (ssize_t i = 0; i < n && o + 5 < outsz; i++) {
@@ -280,10 +299,12 @@ static void read_tracee_bytes(pid_t pid, unsigned long addr, char *outbuf, size_
     else outbuf[o] = '\0';
 }
 
+// Read and format a string argument from tracee memory up to the configured maximum length.
 static void read_tracee_string(pid_t pid, unsigned long addr, char *outbuf, size_t outsz) {
     read_tracee_bytes(pid, addr, outbuf, outsz, (size_t)max_str_len);
 }
 
+// Structure for accumulating per-system-call execution statistics and timing metrics.
 typedef struct {
     long   count;
     long   error_count;
@@ -291,6 +312,7 @@ typedef struct {
     double min_us, max_us;
 } SyscallStat;
 
+// Global accumulators for tracking cumulative syscall metrics and process activity.
 static SyscallStat g_stats[SYSCALL_TABLE_MAX];
 static long g_unknown_count = 0, g_unknown_errs = 0;
 static double g_unknown_us = 0.0;
@@ -298,6 +320,7 @@ static long g_total_traced_calls = 0;
 static long g_total_signals_delivered = 0;
 static long g_total_processes_seen = 0;
 
+// Track per-process tracing state, execution timestamps, and entry arguments.
 #define MAX_TRACEES 256
 typedef struct {
     pid_t pid;
@@ -310,6 +333,7 @@ typedef struct {
 
 static TraceeState tracees[MAX_TRACEES];
 
+// Find an existing tracee state entry or allocate an available slot for a new process.
 static TraceeState *find_or_add_tracee(pid_t pid) {
     for (int i = 0; i < MAX_TRACEES; i++)
         if (tracees[i].active && tracees[i].pid == pid) return &tracees[i];
@@ -325,23 +349,27 @@ static TraceeState *find_or_add_tracee(pid_t pid) {
     return NULL; 
 }
 
+// Mark a terminated tracee entry as inactive.
 static void remove_tracee(pid_t pid) {
     for (int i = 0; i < MAX_TRACEES; i++)
         if (tracees[i].active && tracees[i].pid == pid) tracees[i].active = false;
 }
 
+// Count the total number of currently active tracees.
 static int active_tracee_count(void) {
     int n = 0;
     for (int i = 0; i < MAX_TRACEES; i++) if (tracees[i].active) n++;
     return n;
 }
 
+// Compute the time difference in microseconds between start and end timestamps.
 static double us_diff(struct timespec *start, struct timespec *end) {
     double sec  = (double)(end->tv_sec  - start->tv_sec);
     double nsec = (double)(end->tv_nsec - start->tv_nsec);
     return (sec * 1e6) + (nsec / 1e3);
 }
 
+// Determine if a system call should be traced based on configured filters.
 static bool name_is_filtered_in(const char *name) {
     if (filter_count == 0) return true;
     for (int i = 0; i < filter_count; i++)
@@ -349,11 +377,13 @@ static bool name_is_filtered_in(const char *name) {
     return false;
 }
 
+// Extract system call argument registers according to x86_64 calling conventions.
 static void get_arg_regs(struct user_regs_struct *regs, unsigned long args[6]) {
     args[0] = regs->rdi; args[1] = regs->rsi; args[2] = regs->rdx;
     args[3] = regs->r10; args[4] = regs->r8;  args[5] = regs->r9;
 }
 
+// Configure ptrace options to distinguish syscall stops and optionally track child processes.
 static void apply_trace_options(pid_t pid) {
     long opts = PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL;
     if (follow_forks) {
@@ -363,6 +393,7 @@ static void apply_trace_options(pid_t pid) {
     ptrace(PTRACE_SETOPTIONS, pid, NULL, opts);
 }
 
+// Format system call return values, appending standard error descriptions on failure.
 static void format_retval(long ret, char *buf, size_t bufsz) {
     if (ret < 0) {
         int e = (int)(-ret);
@@ -372,6 +403,7 @@ static void format_retval(long ret, char *buf, size_t bufsz) {
     }
 }
 
+// Print the current wall-clock timestamp prefix when timestamp logging is enabled.
 static void print_timestamp(void) {
     if (!show_timestamp) return;
     struct timespec ts;
@@ -386,6 +418,7 @@ int main(int argc, char *argv[]) {
     pid_t attach_pid = -1;
     out = stdout;
 
+    // Parse command-line flags to configure tracer behavior, filtering, and output mode.
     while (cmd_index < argc && argv[cmd_index][0] == '-') {
         char *a = argv[cmd_index];
         if (!strcmp(a, "-v")) { verbose = true; cmd_index++; }
@@ -421,6 +454,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Validate command-line arguments to ensure a target command or PID is provided.
     if (attach_pid < 0 && cmd_index >= argc) {
         fprintf(stderr,
             "Usage: %s [-v] [-f] [-c] [-tt] [-s N] [-e trace=a,b] [-o file] <command> [args...]\n"
@@ -431,7 +465,9 @@ int main(int argc, char *argv[]) {
 
     pid_t root_pid;
 
+    // Attach to an existing running process using ptrace SEIZE or spawn a new process for tracing.
     if (attach_pid > 0) {
+        // Seize and interrupt the running target process to initiate tracing.
         root_pid = attach_pid;
         if (ptrace(PTRACE_SEIZE, root_pid, NULL, follow_forks ?
                 (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL |
@@ -449,16 +485,19 @@ int main(int argc, char *argv[]) {
         fprintf(out, "Attached to pid %d\n", root_pid);
         ptrace(PTRACE_SYSCALL, root_pid, NULL, NULL);
     } else {
+        // Fork a child process and execute the target program under ptrace supervision.
         pid_t child = fork();
         if (child < 0) { perror("fork"); return 1; }
 
         if (child == 0) {
+            // Enable tracing on child process and replace execution image with target command.
             ptrace(PTRACE_TRACEME, 0, NULL, NULL);
             execvp(argv[cmd_index], &argv[cmd_index]);
             perror("execvp failed");
             _exit(127);
         }
 
+        // Parent tracer waits for initial child stop, configures options, and begins syscall tracing.
         root_pid = child;
         int status;
         waitpid(root_pid, &status, 0);      
@@ -468,12 +507,15 @@ int main(int argc, char *argv[]) {
         ptrace(PTRACE_SYSCALL, root_pid, NULL, NULL);
     }
 
+    // Record wall-clock start time to benchmark total workload execution duration.
     struct timespec wall_start, wall_end;
     clock_gettime(CLOCK_MONOTONIC, &wall_start);
 
     int root_exit_status = -1;
 
+    // Main event loop: intercept and process state transitions, system calls, and signals across all tracees.
     while (active_tracee_count() > 0) {
+        // Wait for any traced process or thread to report a ptrace event or state change.
         int status;
         pid_t p = waitpid(-1, &status, __WALL);
         if (p < 0) {
@@ -481,6 +523,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        // Handle process exit or fatal termination signals and update active tracee records.
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
             if (p == root_pid) root_exit_status = status;
             remove_tracee(p);
@@ -491,6 +534,8 @@ int main(int argc, char *argv[]) {
 
         int sig = WSTOPSIG(status);
         int event = status >> 16; 
+        
+        // Intercept process creation events (fork/vfork/clone) to attach to and track new child processes.
         if (event == PTRACE_EVENT_FORK || event == PTRACE_EVENT_VFORK || event == PTRACE_EVENT_CLONE) {
             unsigned long newpid_ul = 0;
             ptrace(PTRACE_GETEVENTMSG, p, NULL, &newpid_ul);
@@ -504,22 +549,27 @@ int main(int argc, char *argv[]) {
             ptrace(PTRACE_SYSCALL, p, NULL, NULL);
             continue;
         }
+        
+        // Handle exec events when the traced process replaces its image.
         if (event == PTRACE_EVENT_EXEC) {
             ptrace(PTRACE_SYSCALL, p, NULL, NULL);
             continue;
         }
 
+        // Handle system call boundary stops (entry and exit) signaled with PTRACE_O_TRACESYSGOOD.
         if (sig == (SIGTRAP | 0x80)) {
             TraceeState *tst = find_or_add_tracee(p);
             struct user_regs_struct regs;
             ptrace(PTRACE_GETREGS, p, NULL, &regs);
 
             if (!tst->in_syscall) {
+                // System call entry: capture syscall number, arguments, and timestamp.
                 tst->current_syscall = regs.orig_rax;
                 get_arg_regs(&regs, tst->entry_args);
                 clock_gettime(CLOCK_MONOTONIC, &tst->t_start);
                 tst->in_syscall = true;
 
+                // Decode and print entry parameters in verbose mode.
                 if (verbose && !counts_only) {
                     long n = tst->current_syscall;
                     const char *name = (n >= 0 && n < SYSCALL_TABLE_MAX) ? SYSCALL_NAMES[n] : NULL;
@@ -543,12 +593,14 @@ int main(int argc, char *argv[]) {
                     }
                 }
             } else {
+                // System call exit: compute execution latency, update performance metrics, and record errors.
                 struct timespec t_end;
                 clock_gettime(CLOCK_MONOTONIC, &t_end);
                 long ret_val = (long)regs.rax;
                 long n = tst->current_syscall;
                 double elapsed_us = us_diff(&tst->t_start, &t_end);
 
+                // Aggregate metrics into per-syscall statistics tables.
                 if (n >= 0 && n < SYSCALL_TABLE_MAX) {
                     SyscallStat *st = &g_stats[n];
                     if (st->count == 0) { st->min_us = st->max_us = elapsed_us; }
@@ -563,6 +615,7 @@ int main(int argc, char *argv[]) {
                 }
                 g_total_traced_calls++;
 
+                // Format and display return values and execution latency in verbose mode.
                 if (verbose && !counts_only) {
                     const char *name = (n >= 0 && n < SYSCALL_TABLE_MAX) ? SYSCALL_NAMES[n] : NULL;
                     if (name_is_filtered_in(name)) {
@@ -592,10 +645,12 @@ int main(int argc, char *argv[]) {
                 }
                 tst->in_syscall = false;
             }
+            // Resume the tracee process to execute until the next system call event.
             ptrace(PTRACE_SYSCALL, p, NULL, NULL);
             continue;
         }
 
+        // Intercept and deliver process signals to the tracee.
         g_total_signals_delivered++;
         if (verbose && !counts_only) {
             print_timestamp();
@@ -604,9 +659,11 @@ int main(int argc, char *argv[]) {
         ptrace(PTRACE_SYSCALL, p, NULL, (sig == SIGSTOP || sig == SIGTRAP) ? 0 : (void*)(long)sig);
     }
 
+    // Compute total elapsed wall-clock execution time.
     clock_gettime(CLOCK_MONOTONIC, &wall_end);
     double wall_us = us_diff(&wall_start, &wall_end);
 
+    // Print summary report header and per-syscall execution metrics.
     fprintf(out, "\n===================== SysTrace Report =====================\n");
     if (follow_forks)
         fprintf(out, "Processes/threads traced : %ld\n", g_total_processes_seen);
@@ -617,6 +674,7 @@ int main(int argc, char *argv[]) {
     double grand_total_us = 0.0;
     double cat_us[CAT__COUNT] = {0};
 
+    // Iterate through syscall metrics table to compute totals and print per-call statistics.
     for (int i = 0; i < SYSCALL_TABLE_MAX; i++) {
         if (g_stats[i].count == 0) continue;
         const char *name = SYSCALL_NAMES[i] ? SYSCALL_NAMES[i] : "other";
@@ -635,6 +693,7 @@ int main(int argc, char *argv[]) {
                 g_unknown_us / g_unknown_count, "-", "-", g_unknown_errs);
     }
 
+    // Display cumulative execution summary and CPU time metrics.
     fprintf(out, "-----------------------------------------------------------------------------\n");
     fprintf(out, "Total syscalls traced     : %ld\n", g_total_traced_calls);
     fprintf(out, "Total kernel time         : %.2f us (%.2f ms)\n", grand_total_us, grand_total_us / 1000.0);
@@ -644,6 +703,7 @@ int main(int argc, char *argv[]) {
         fprintf(out, "Time spent in kernel      : %.2f%% of wall-clock run time\n",
                 (grand_total_us / wall_us) * 100.0);
 
+    // Rank categories by kernel time consumption and identify primary performance bottlenecks.
     if (grand_total_us > 0) {
         fprintf(out, "-----------------------------------------------------------------------------\n");
         fprintf(out, "By category:\n");
@@ -670,6 +730,7 @@ int main(int argc, char *argv[]) {
                     CATEGORY_LABEL[top], top_pct);
     }
 
+    // Display the final exit status of the root traced process.
     if (root_exit_status >= 0) {
         if (WIFEXITED(root_exit_status))
             fprintf(out, "Traced command exited with status %d\n", WEXITSTATUS(root_exit_status));
@@ -679,6 +740,7 @@ int main(int argc, char *argv[]) {
     }
     fprintf(out, "=============================================================================\n");
 
+    // Close output stream if redirected to a file.
     if (out != stdout) fclose(out);
     return 0;
 }
