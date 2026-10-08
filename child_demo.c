@@ -6,7 +6,6 @@
 int main() {
     // Create multiple processes using fork to simulate concurrent execution and test fork tracking.
     pid_t pid = fork();
-    fork();
 
     // Handle process creation failure.
     if (pid < 0) {
