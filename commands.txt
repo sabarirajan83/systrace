@@ -1,3 +1,7 @@
+# ==============================================================================
+# SYSTRACE COMMAND USAGE & EXAMPLES GUIDE
+# ==============================================================================
+
 # 1. Default Tracing (Summary Report at exit)
 ./systrace ./test_workload
 
@@ -23,8 +27,29 @@
 # 8. -o (Output File: redirect trace logs and report to a file)
 ./systrace -v -o trace_output.log ./test_workload
 
-# 9. -p (Attach: attach to a running process by its PID)
-./systrace -v -p <PID>
+# 9. -p (Attach to Running Process vs. Spawning a New Process for Tracking)
+# A. Attach to an existing running process by PID (does not create a new process)
+./systrace -v -p 1234
 
-# 10. Combined Flags Example
+# B. Create a new target process in background and attach immediately using its PID ($!)
+./test_workload & ./systrace -v -p $!
+
+# 10. Multi-Threaded Process Attach with File Output
+# Spawns a multi-threaded workload in the background, attaches via PID ($!), 
+# follows all newly created child threads (-f), and logs everything to a file.
+./child_demo & ./systrace -v -f -o attached_threads.log -p $!
+
+# 11. Silent Profile & Count Report for Attached Target
+# Attaches to a running server or worker process by PID and generates a clean
+# statistical summary on exit without cluttering stdout with live trace logs.
+./systrace -c -p 5678
+
+# 12. Timestamped File I/O Audit
+# Traces file-related system calls with full wall-clock timestamps and extended
+# string character limits (up to 128 bytes) to inspect full path strings.
+./systrace -v -tt -s 128 -e trace=openat,read,write,close ./test_workload
+
+# 13. Comprehensive Diagnostic Suite
+# Combines process following (-f), timestamps (-tt), string inspection buffer (-s 64),
+# custom syscall filtering (-e), and output file redirection (-o).
 ./systrace -v -f -tt -s 64 -e trace=read,write,openat -o trace_report.log ./test_workload
